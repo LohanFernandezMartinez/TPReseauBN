@@ -8,6 +8,7 @@ client <adresse-serveur> <message-a-transmettre>
 #include <sys/socket.h>
 #include <netdb.h>
 #include <string.h>
+#include "interface.h"
 
 typedef struct sockaddr 	sockaddr;
 typedef struct sockaddr_in 	sockaddr_in;
@@ -15,6 +16,8 @@ typedef struct hostent 		hostent;
 typedef struct servent 		servent;
 
 int main(int argc, char **argv) {
+    // Initialisation de l'interface graphique
+    init_SDL();
   
     int 	socket_descriptor, 	/* descripteur de socket */
 		longueur; 		/* longueur d'un buffer utilisé */
@@ -108,6 +111,28 @@ int main(int argc, char **argv) {
     
     printf("connexion avec le serveur fermee, fin du programme.\n");
     
-    exit(0);
+    // Boucle principale
+    int quit = 0;
+    SDL_Event e;
+
+    while (!quit) {
+        while (SDL_PollEvent(&e) != 0) {
+            if (e.type == SDL_QUIT) {
+                quit = 1;
+            }
+            // Gérer les événements de clic de souris pour envoyer les actions au serveur
+        }
+
+        SDL_SetRenderDrawColor(renderer, 255, 255, 255, SDL_ALPHA_OPAQUE);
+        SDL_RenderClear(renderer);
+
+        draw_grid();
+        // Mettre à jour les bateaux et les tirs en fonction des messages reçus du serveur
+
+        SDL_RenderPresent(renderer);
+    }
+
+    close_SDL();
+    return 0;
     
 }
