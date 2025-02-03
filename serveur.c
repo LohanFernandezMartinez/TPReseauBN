@@ -114,24 +114,24 @@ int main(int argc, char **argv) {
     /* attente des connexions et traitement des donnees recues */
     for(;;) {
     
-		longueur_adresse_courante = sizeof(adresse_client_courant);
-		
-		/* adresse_client_courant sera renseigné par accept via les infos du connect */
-		if ((nouv_socket_descriptor = 
-			accept(socket_descriptor, 
-			       (sockaddr*)(&adresse_client_courant),
-			       &longueur_adresse_courante))
-			 < 0) {
-			perror("erreur : impossible d'accepter la connexion avec le client.");
-			exit(1);
-		}
-		
-		/* traitement du message */
-		printf("reception d'un message.\n");
-		
-		renvoi(nouv_socket_descriptor);
-						
-		close(nouv_socket_descriptor);
+      longueur_adresse_courante = sizeof(adresse_client_courant);
+      
+      /* adresse_client_courant sera renseigné par accept via les infos du connect */
+      if ((nouv_socket_descriptor = 
+        accept(socket_descriptor, 
+              (sockaddr*)(&adresse_client_courant),
+              &longueur_adresse_courante))
+        < 0) {
+        perror("erreur : impossible d'accepter la connexion avec le client.");
+        exit(1);
+      }
+      
+      /* traitement du message */
+      printf("reception d'un message.\n");
+      
+      renvoi(nouv_socket_descriptor);
+              
+      close(nouv_socket_descriptor);
 		
     }
 
