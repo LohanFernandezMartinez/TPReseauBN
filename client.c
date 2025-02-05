@@ -1,138 +1,182 @@
-/*-----------------------------------------------------------
-Client a lancer apres le serveur avec la commande :
-client <adresse-serveur> <message-a-transmettre>
-------------------------------------------------------------*/
+// client.c
 #include <stdlib.h>
 #include <stdio.h>
 #include <linux/types.h>
 #include <sys/socket.h>
 #include <netdb.h>
 #include <string.h>
+#include <pthread.h>
+#include <unistd.h>
 #include "interface.h"
 
-typedef struct sockaddr 	sockaddr;
-typedef struct sockaddr_in 	sockaddr_in;
-typedef struct hostent 		hostent;
-typedef struct servent 		servent;
+#define BUFFER_SIZE 1024
+#define SERVER_PORT 5000
 
-int main(int argc, char **argv) {
-    // Initialisation de l'interface graphique
-    init_SDL();
-  
-    int 	socket_descriptor, 	/* descripteur de socket */
-		longueur; 		/* longueur d'un buffer utilisé */
-    sockaddr_in adresse_locale; 	/* adresse de socket local */
-    hostent *	ptr_host; 		/* info sur une machine hote */
-    servent *	ptr_service; 		/* info sur service */
-    char 	buffer[256];
-    char *	prog; 			/* nom du programme */
-    char *	host; 			/* nom de la machine distante */
-    char *	mesg; 			/* message envoyé */
-     
-    if (argc != 3) {
-	perror("usage : client <adresse-serveur> <message-a-transmettre>");
-	exit(1);
+typedef struct {
+    int socket_descriptor;
+    int running;
+    struct sockaddr_in server_addr;
+    pthread_mutex_t mutex;
+    // État du jeu
+    int my_grid[10][10];
+    int opponent_grid[10][10];
+    int my_turn;
+} GameState;
+
+// Structure pour les messages du jeu
+typedef struct {
+    uint32_t message_id;  // Pour détecter les doublons
+    uint8_t type;         // Type de message (tir, résultat, etc.)
+    uint8_t x;           // Coordonnée X
+    uint8_t y;           // Coordonnée Y
+    uint8_t result;      // Résultat (touché, manqué, etc.)
+} GameMessage;
+
+// Thread pour recevoir les messages du serveur
+void* receive_thread(void* arg) {
+    GameState* state = (GameState*)arg;
+    char buffer[BUFFER_SIZE];
+    struct sockaddr_in from_addr;
+    socklen_t from_len = sizeof(from_addr);
+    GameMessage* msg;
+
+    while(state->running) {
+        int received = recvfrom(state->socket_descriptor, buffer, BUFFER_SIZE, 0,
+                              (struct sockaddr*)&from_addr, &from_len);
+        
+        if(received > 0) {
+            msg = (GameMessage*)buffer;
+            pthread_mutex_lock(&state->mutex);
+            
+            switch(msg->type) {
+                case 1: // Tir reçu
+                    printf("Tir reçu en %d,%d\n", msg->x, msg->y);
+                    // Traiter le tir
+                    break;
+                    
+                case 2: // Résultat de notre tir
+                    printf("Résultat du tir: %s\n", msg->result ? "Touché!" : "Manqué!");
+                    state->opponent_grid[msg->x][msg->y] = msg->result + 1;
+                    state->my_turn = 1;
+                    break;
+            }
+            
+            pthread_mutex_unlock(&state->mutex);
+        }
     }
-   
-    prog = argv[0];
-    host = argv[1];
-    mesg = argv[2];
-    
-    printf("nom de l'executable : %s \n", prog);
-    printf("adresse du serveur  : %s \n", host);
-    printf("message envoye      : %s \n", mesg);
+    return NULL;
+}
+
+int init_connection(const char* host, GameState* state) {
+    struct hostent* ptr_host;
     
     if ((ptr_host = gethostbyname(host)) == NULL) {
-	perror("erreur : impossible de trouver le serveur a partir de son adresse.");
-	exit(1);
+        perror("Erreur : impossible de trouver le serveur.");
+        return 0;
     }
-    
-    /* copie caractere par caractere des infos de ptr_host vers adresse_locale */
-    bcopy((char*)ptr_host->h_addr, (char*)&adresse_locale.sin_addr, ptr_host->h_length);
-    adresse_locale.sin_family = AF_INET; /* ou ptr_host->h_addrtype; */
-    
-    /* 2 facons de definir le service que l'on va utiliser a distance */
-    /* (commenter l'une ou l'autre des solutions) */
-    
-    /*-----------------------------------------------------------*/
-    /* SOLUTION 1 : utiliser un service existant, par ex. "irc" */
-    /*
-    if ((ptr_service = getservbyname("irc","tcp")) == NULL) {
-	perror("erreur : impossible de recuperer le numero de port du service desire.");
-	exit(1);
-    }
-    adresse_locale.sin_port = htons(ptr_service->s_port);
-    */
-    /*-----------------------------------------------------------*/
-    
-    /*-----------------------------------------------------------*/
-    /* SOLUTION 2 : utiliser un nouveau numero de port */
-    adresse_locale.sin_port = htons(5000);
-    /*-----------------------------------------------------------*/
-    
-    printf("numero de port pour la connexion au serveur : %d \n", ntohs(adresse_locale.sin_port));
-    
-    /* creation de la socket */
-    if ((socket_descriptor = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
-	perror("erreur : impossible de creer la socket de connexion avec le serveur.");
-	exit(1);
-    }
-    
-    /* tentative de connexion au serveur dont les infos sont dans adresse_locale */
-    if ((connect(socket_descriptor, (sockaddr*)(&adresse_locale), sizeof(adresse_locale))) < 0) {
-	perror("erreur : impossible de se connecter au serveur.");
-	exit(1);
-    }
-    
-    printf("connexion etablie avec le serveur. \n");
-    
-    printf("envoi d'un message au serveur. \n");
-      
-    /* envoi du message vers le serveur */
-    if ((write(socket_descriptor, mesg, strlen(mesg))) < 0) {
-	perror("erreur : impossible d'ecrire le message destine au serveur.");
-	exit(1);
-    }
-    
-    /* mise en attente du prgramme pour simuler un delai de transmission */
-    sleep(3);
-     
-    printf("message envoye au serveur. \n");
-                
-    /* lecture de la reponse en provenance du serveur */
-    while((longueur = read(socket_descriptor, buffer, sizeof(buffer))) > 0) {
-	printf("reponse du serveur : \n");
-	write(1,buffer,longueur);
-    }
-    
-    printf("\nfin de la reception.\n");
-    
-    close(socket_descriptor);
-    
-    printf("connexion avec le serveur fermee, fin du programme.\n");
-    
-    // Boucle principale
-    int quit = 0;
-    SDL_Event e;
 
-    while (!quit) {
-        while (SDL_PollEvent(&e) != 0) {
+    // Création socket UDP
+    if ((state->socket_descriptor = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
+        perror("Erreur : création socket impossible.");
+        return 0;
+    }
+
+    // Configuration adresse serveur
+    memset(&state->server_addr, 0, sizeof(state->server_addr));
+    state->server_addr.sin_family = AF_INET;
+    state->server_addr.sin_port = htons(SERVER_PORT);
+    bcopy((char*)ptr_host->h_addr, (char*)&state->server_addr.sin_addr, ptr_host->h_length);
+
+    return 1;
+}
+
+// Envoyer un tir au serveur
+void send_shot(GameState* state, int x, int y) {
+    static uint32_t message_counter = 0;
+    GameMessage msg = {
+        .message_id = ++message_counter,
+        .type = 1,  // Type tir
+        .x = x,
+        .y = y
+    };
+    
+    sendto(state->socket_descriptor, &msg, sizeof(msg), 0,
+           (struct sockaddr*)&state->server_addr, sizeof(state->server_addr));
+    
+    state->my_turn = 0;  // Attendre la réponse
+}
+
+int main(int argc, char **argv) {
+    if (argc != 2) {
+        printf("Usage : %s <adresse-serveur>\n", argv[0]);
+        exit(1);
+    }
+
+    GameState state = {0};
+    state.running = 1;
+    pthread_mutex_init(&state.mutex, NULL);
+
+    if (!init_connection(argv[1], &state)) {
+        exit(1);
+    }
+
+    if (!init_SDL()) {
+        close(state.socket_descriptor);
+        pthread_mutex_destroy(&state.mutex);
+        exit(1);
+    }
+
+    // Création thread réception
+    pthread_t receive_tid;
+    if (pthread_create(&receive_tid, NULL, receive_thread, &state) != 0) {
+        perror("Erreur création thread réception");
+        close(state.socket_descriptor);
+        close_SDL();
+        pthread_mutex_destroy(&state.mutex);
+        exit(1);
+    }
+
+    // Boucle principale SDL
+    SDL_Event e;
+    int mouse_x, mouse_y;
+    
+    while (state.running) {
+        while (SDL_PollEvent(&e)) {
             if (e.type == SDL_QUIT) {
-                quit = 1;
+                state.running = 0;
             }
-            // Gérer les événements de clic de souris pour envoyer les actions au serveur
+            else if (e.type == SDL_MOUSEBUTTONDOWN && state.my_turn) {
+                SDL_GetMouseState(&mouse_x, &mouse_y);
+                // Convertir les coordonnées souris en coordonnées grille
+                int grid_x = mouse_x / CELL_SIZE;
+                int grid_y = mouse_y / CELL_SIZE;
+                if (grid_x < 10 && grid_y < 10) {
+                    send_shot(&state, grid_x, grid_y);
+                }
+            }
         }
 
-        SDL_SetRenderDrawColor(renderer, 255, 255, 255, SDL_ALPHA_OPAQUE);
+        pthread_mutex_lock(&state.mutex);
+        
+        // Rendu
+        SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
         SDL_RenderClear(renderer);
 
+        // Dessiner les grilles
         draw_grid();
-        // Mettre à jour les bateaux et les tirs en fonction des messages reçus du serveur
+        // TODO: Dessiner les bateaux et les tirs
 
+        pthread_mutex_unlock(&state.mutex);
+        
         SDL_RenderPresent(renderer);
+        SDL_Delay(16);
     }
 
+    // Nettoyage
+    pthread_join(receive_tid, NULL);
+    close(state.socket_descriptor);
+    pthread_mutex_destroy(&state.mutex);
     close_SDL();
+
     return 0;
-    
 }

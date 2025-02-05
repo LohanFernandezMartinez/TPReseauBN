@@ -1,162 +1,210 @@
-/*----------------------------------------------
-Serveur à lancer avant le client
-------------------------------------------------*/
 #include <stdlib.h>
 #include <stdio.h>
-#include <linux/types.h> 	/* pour les sockets */
+#include <linux/types.h>
 #include <sys/socket.h>
-#include <netdb.h> 		/* pour hostent, servent */
-#include <string.h> 		/* pour bcopy, ... */  
+#include <netdb.h>
+#include <string.h>
+#include <pthread.h>
+#include <unistd.h>
 #include "interface.h"
-#define TAILLE_MAX_NOM 256
 
-typedef struct sockaddr sockaddr;
-typedef struct sockaddr_in sockaddr_in;
-typedef struct hostent hostent;
-typedef struct servent servent;
+#define MAX_CLIENTS 10
+#define BUFFER_SIZE 1024
+#define PORT 5000
 
-/*------------------------------------------------------*/
-void renvoi (int sock) {
+typedef struct {
+    struct sockaddr_in addr;
+    int grid[10][10];
+    uint32_t last_message_id;
+    time_t last_seen;
+} Client;
 
-    char buffer[256];
-    int longueur;
-   
-    if ((longueur = read(sock, buffer, sizeof(buffer))) <= 0) 
-    	return;
-    
-    printf("message lu : %s \n", buffer);
-    
-    buffer[0] = 'R';
-    buffer[1] = 'E';
-    buffer[longueur] = '#';
-    buffer[longueur+1] ='\0';
-    
-    printf("message apres traitement : %s \n", buffer);
-    
-    printf("renvoi du message traite.\n");
+typedef struct {
+    int socket_descriptor;
+    int running;
+    int nb_clients;
+    Client clients[MAX_CLIENTS];
+    pthread_mutex_t mutex;
+} ServerState;
 
-    /* mise en attente du prgramme pour simuler un delai de transmission */
-    sleep(3);
+typedef struct {
+    uint32_t message_id;
+    uint8_t type;
+    uint8_t x;
+    uint8_t y;
+    uint8_t result;
+} GameMessage;
+
+// Trouver ou ajouter un client
+int find_or_add_client(ServerState* state, struct sockaddr_in* addr) {
+    int i;
+    for(i = 0; i < state->nb_clients; i++) {
+        if(state->clients[i].addr.sin_addr.s_addr == addr->sin_addr.s_addr &&
+           state->clients[i].addr.sin_port == addr->sin_port) {
+            state->clients[i].last_seen = time(NULL);
+            return i;
+        }
+    }
     
-    write(sock,buffer,strlen(buffer)+1);
+    if(state->nb_clients < MAX_CLIENTS) {
+        i = state->nb_clients++;
+        state->clients[i].addr = *addr;
+        state->clients[i].last_seen = time(NULL);
+        memset(state->clients[i].grid, 0, sizeof(state->clients[i].grid));
+        state->clients[i].last_message_id = 0;
+        return i;
+    }
     
-    printf("message envoye. \n");
-        
-    return;
-    
+    return -1;
 }
-/*------------------------------------------------------*/
 
-/*------------------------------------------------------*/
-int main(int argc, char **argv) {
-    // Initialisation de l'interface graphique
-    init_SDL();
-
-    int 		socket_descriptor, 		/* descripteur de socket */
-			nouv_socket_descriptor, 	/* [nouveau] descripteur de socket */
-			longueur_adresse_courante; 	/* longueur d'adresse courante d'un client */
-    sockaddr_in 	adresse_locale, 		/* structure d'adresse locale*/
-			adresse_client_courant; 	/* adresse client courant */
-    hostent*		ptr_hote; 			/* les infos recuperees sur la machine hote */
-    servent*		ptr_service; 			/* les infos recuperees sur le service de la machine */
-    char 		machine[TAILLE_MAX_NOM+1]; 	/* nom de la machine locale */
-    
-    gethostname(machine,TAILLE_MAX_NOM);		/* recuperation du nom de la machine */
-    
-    /* recuperation de la structure d'adresse en utilisant le nom */
-    if ((ptr_hote = gethostbyname(machine)) == NULL) {
-		perror("erreur : impossible de trouver le serveur a partir de son nom.");
-		exit(1);
+// Thread pour nettoyer les clients inactifs
+void* cleanup_thread(void* arg) {
+    ServerState* state = (ServerState*)arg;
+    while(state->running) {
+        sleep(5);  // Vérifier toutes les 5 secondes
+        
+        pthread_mutex_lock(&state->mutex);
+        time_t now = time(NULL);
+        
+        for(int i = 0; i < state->nb_clients; i++) {
+            if(now - state->clients[i].last_seen > 30) {  // 30 secondes timeout
+                printf("Client %d timeout\n", i);
+                // Déplacer le dernier client à cette position
+                if(i < state->nb_clients - 1) {
+                    state->clients[i] = state->clients[state->nb_clients - 1];
+                }
+                state->nb_clients--;
+                i--;  // Revérifier cette position
+            }
+        }
+        
+        pthread_mutex_unlock(&state->mutex);
     }
-    
-    /* initialisation de la structure adresse_locale avec les infos recuperees */			
-    
-    /* copie de ptr_hote vers adresse_locale */
-    bcopy((char*)ptr_hote->h_addr, (char*)&adresse_locale.sin_addr, ptr_hote->h_length);
-    adresse_locale.sin_family		= ptr_hote->h_addrtype; 	/* ou AF_INET */
-    adresse_locale.sin_addr.s_addr	= INADDR_ANY; 			/* ou AF_INET */
+    return NULL;
+}
 
-    /* 2 facons de definir le service que l'on va utiliser a distance */
-    /* (commenter l'une ou l'autre des solutions) */
+int init_server(ServerState* state) {
+    struct sockaddr_in addr;
     
-    /*-----------------------------------------------------------*/
-    /* SOLUTION 1 : utiliser un service existant, par ex. "irc" */
-    /*
-    if ((ptr_service = getservbyname("irc","tcp")) == NULL) {
-		perror("erreur : impossible de recuperer le numero de port du service desire.");
-		exit(1);
-    }
-    adresse_locale.sin_port = htons(ptr_service->s_port);
-    */
-    /*-----------------------------------------------------------*/
-    /* SOLUTION 2 : utiliser un nouveau numero de port */
-    adresse_locale.sin_port = htons(5000);
-    /*-----------------------------------------------------------*/
-    
-    printf("numero de port pour la connexion au serveur : %d \n", 
-		   ntohs(adresse_locale.sin_port) /*ntohs(ptr_service->s_port)*/);
-    
-    /* creation de la socket */
-    if ((socket_descriptor = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
-		perror("erreur : impossible de creer la socket de connexion avec le client.");
-		exit(1);
+    // Création socket UDP
+    if ((state->socket_descriptor = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
+        perror("Erreur création socket");
+        return 0;
     }
 
-    /* association du socket socket_descriptor à la structure d'adresse adresse_locale */
-    if ((bind(socket_descriptor, (sockaddr*)(&adresse_locale), sizeof(adresse_locale))) < 0) {
-		perror("erreur : impossible de lier la socket a l'adresse de connexion.");
-		exit(1);
-    }
-    
-    /* initialisation de la file d'ecoute */
-    listen(socket_descriptor,5);
+    // Configuration adresse
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_port = htons(PORT);
 
-    /* attente des connexions et traitement des donnees recues */
-    for(;;) {
-    
-      longueur_adresse_courante = sizeof(adresse_client_courant);
-      
-      /* adresse_client_courant sera renseigné par accept via les infos du connect */
-      if ((nouv_socket_descriptor = 
-        accept(socket_descriptor, 
-              (sockaddr*)(&adresse_client_courant),
-              &longueur_adresse_courante))
-        < 0) {
-        perror("erreur : impossible d'accepter la connexion avec le client.");
+    // Bind
+    if (bind(state->socket_descriptor, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        perror("Erreur bind");
+        return 0;
+    }
+
+    return 1;
+}
+
+int main(void) {
+    ServerState state = {0};
+    state.running = 1;
+    pthread_mutex_init(&state.mutex, NULL);
+
+    if (!init_server(&state)) {
         exit(1);
-      }
-      
-      /* traitement du message */
-      printf("reception d'un message.\n");
-      
-      renvoi(nouv_socket_descriptor);
-              
-      close(nouv_socket_descriptor);
-		
     }
+
+    if (!init_SDL()) {
+        close(state.socket_descriptor);
+        pthread_mutex_destroy(&state.mutex);
+        exit(1);
+    }
+
+    // Thread pour nettoyer les clients inactifs
+    pthread_t cleanup_tid;
+    pthread_create(&cleanup_tid, NULL, cleanup_thread, &state);
+
+    char buffer[BUFFER_SIZE];
+    struct sockaddr_in client_addr;
+    socklen_t client_len = sizeof(client_addr);
+    GameMessage* msg;
+    GameMessage response;
 
     // Boucle principale
-    int quit = 0;
-    SDL_Event e;
-
-    while (!quit) {
-        while (SDL_PollEvent(&e) != 0) {
+    while(state.running) {
+        // Gestion des événements SDL
+        SDL_Event e;
+        while (SDL_PollEvent(&e)) {
             if (e.type == SDL_QUIT) {
-                quit = 1;
+                state.running = 0;
             }
-            // Gérer les événements de clic de souris pour envoyer les actions au client
         }
 
-        SDL_SetRenderDrawColor(renderer, 255, 255, 255, SDL_ALPHA_OPAQUE);
+        // Réception des messages (non-bloquant)
+        struct timeval tv = {0, 0};  // Polling immédiat
+        fd_set readfds;
+        FD_ZERO(&readfds);
+        FD_SET(state.socket_descriptor, &readfds);
+        
+        if (select(state.socket_descriptor + 1, &readfds, NULL, NULL, &tv) > 0) {
+            int received = recvfrom(state.socket_descriptor, buffer, BUFFER_SIZE, 0,
+                                  (struct sockaddr*)&client_addr, &client_len);
+            
+            if(received > 0) {
+                pthread_mutex_lock(&state.mutex);
+                
+                int client_id = find_or_add_client(&state, &client_addr);
+                if(client_id >= 0) {
+                    msg = (GameMessage*)buffer;
+                    
+                    // Éviter les doublons
+                    if(msg->message_id > state.clients[client_id].last_message_id) {
+                        state.clients[client_id].last_message_id = msg->message_id;
+                        
+                        // Traiter le message
+                        switch(msg->type) {
+                            case 1:  // Tir
+                                printf("Tir reçu du client %d en %d,%d\n", 
+                                       client_id, msg->x, msg->y);
+                                
+                                // Envoyer la réponse
+                                response.message_id = msg->message_id;
+                                response.type = 2;
+                                response.x = msg->x;
+                                response.y = msg->y;
+                                response.result = 0;  // 0 = manqué, 1 = touché
+                                
+                                sendto(state.socket_descriptor, &response, sizeof(response), 0,
+                                      (struct sockaddr*)&client_addr, client_len);
+                                break;
+                        }
+                    }
+                }
+                
+                pthread_mutex_unlock(&state.mutex);
+            }
+        }
+
+        // Rendu SDL
+        SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
         SDL_RenderClear(renderer);
-
-        draw_grid();
-        // Mettre à jour les bateaux et les tirs en fonction des actions des clients
-
+        
+        pthread_mutex_lock(&state.mutex);
+        // TODO: Afficher l'état des parties en cours
+        pthread_mutex_unlock(&state.mutex);
+        
         SDL_RenderPresent(renderer);
+        SDL_Delay(16);
     }
 
+    // Nettoyage
+    pthread_join(cleanup_tid, NULL);
+    close(state.socket_descriptor);
+    pthread_mutex_destroy(&state.mutex);
     close_SDL();
+
     return 0;
 }
-/*------------------------------------------------------*/
