@@ -11,23 +11,31 @@
 SDL_Window *window = NULL;
 SDL_Renderer *renderer = NULL;
 
-void init_SDL() {
+int init_SDL() {
     if (SDL_Init(SDL_INIT_VIDEO) < 0) {
         printf("SDL could not initialize! SDL_Error: %s\n", SDL_GetError());
-        exit(1);
+        return 0;
     }
 
-    window = SDL_CreateWindow("Bataille Navale", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, WINDOW_WIDTH, WINDOW_HEIGHT, SDL_WINDOW_SHOWN);
+    window = SDL_CreateWindow("Bataille Navale", 
+                            SDL_WINDOWPOS_UNDEFINED, 
+                            SDL_WINDOWPOS_UNDEFINED, 
+                            WINDOW_WIDTH, 
+                            WINDOW_HEIGHT, 
+                            SDL_WINDOW_SHOWN);
     if (window == NULL) {
         printf("Window could not be created! SDL_Error: %s\n", SDL_GetError());
-        exit(1);
+        return 0;
     }
 
     renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
     if (renderer == NULL) {
         printf("Renderer could not be created! SDL_Error: %s\n", SDL_GetError());
-        exit(1);
+        SDL_DestroyWindow(window);
+        return 0;
     }
+
+    return 1;
 }
 
 void close_SDL() {

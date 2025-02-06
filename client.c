@@ -1,4 +1,3 @@
-// client.c
 #include <stdlib.h>
 #include <stdio.h>
 #include <linux/types.h>
@@ -9,7 +8,7 @@
 #include <unistd.h>
 #include "interface.h"
 
-#define BUFFER_SIZE 1024
+#define BUFFER_SIZE 1024    // Mémoire tampon
 #define SERVER_PORT 5000
 
 typedef struct {
