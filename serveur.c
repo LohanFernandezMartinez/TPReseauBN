@@ -1,210 +1,148 @@
-#include <stdlib.h>
 #include <stdio.h>
-#include <linux/types.h>
-#include <sys/socket.h>
-#include <netdb.h>
+#include <stdlib.h>
 #include <string.h>
-#include <pthread.h>
-#include <unistd.h>
-#include "interface.h"
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <signal.h>
+#include "message.h"
 
-#define MAX_CLIENTS 10
-#define BUFFER_SIZE 1024
 #define PORT 5000
+#define MAX_CLIENTS 2
 
 typedef struct {
     struct sockaddr_in addr;
     int grid[10][10];
-    uint32_t last_message_id;
-    time_t last_seen;
 } Client;
 
-typedef struct {
-    int socket_descriptor;
-    int running;
-    int nb_clients;
-    Client clients[MAX_CLIENTS];
-    pthread_mutex_t mutex;
-} ServerState;
+volatile int running = 1;
 
-typedef struct {
-    uint32_t message_id;
-    uint8_t type;
-    uint8_t x;
-    uint8_t y;
-    uint8_t result;
-} GameMessage;
-
-// Trouver ou ajouter un client
-int find_or_add_client(ServerState* state, struct sockaddr_in* addr) {
-    int i;
-    for(i = 0; i < state->nb_clients; i++) {
-        if(state->clients[i].addr.sin_addr.s_addr == addr->sin_addr.s_addr &&
-           state->clients[i].addr.sin_port == addr->sin_port) {
-            state->clients[i].last_seen = time(NULL);
-            return i;
-        }
-    }
-    
-    if(state->nb_clients < MAX_CLIENTS) {
-        i = state->nb_clients++;
-        state->clients[i].addr = *addr;
-        state->clients[i].last_seen = time(NULL);
-        memset(state->clients[i].grid, 0, sizeof(state->clients[i].grid));
-        state->clients[i].last_message_id = 0;
-        return i;
-    }
-    
-    return -1;
-}
-
-// Thread pour nettoyer les clients inactifs
-void* cleanup_thread(void* arg) {
-    ServerState* state = (ServerState*)arg;
-    while(state->running) {
-        sleep(5);  // Vérifier toutes les 5 secondes
-        
-        pthread_mutex_lock(&state->mutex);
-        time_t now = time(NULL);
-        
-        for(int i = 0; i < state->nb_clients; i++) {
-            if(now - state->clients[i].last_seen > 30) {  // 30 secondes timeout
-                printf("Client %d timeout\n", i);
-                // Déplacer le dernier client à cette position
-                if(i < state->nb_clients - 1) {
-                    state->clients[i] = state->clients[state->nb_clients - 1];
-                }
-                state->nb_clients--;
-                i--;  // Revérifier cette position
-            }
-        }
-        
-        pthread_mutex_unlock(&state->mutex);
-    }
-    return NULL;
-}
-
-int init_server(ServerState* state) {
-    struct sockaddr_in addr;
-    
-    // Création socket UDP
-    if ((state->socket_descriptor = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
-        perror("Erreur création socket");
-        return 0;
-    }
-
-    // Configuration adresse
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    addr.sin_port = htons(PORT);
-
-    // Bind
-    if (bind(state->socket_descriptor, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        perror("Erreur bind");
-        return 0;
-    }
-
-    return 1;
+void handle_sigint(int sig) {
+    running = 0;
 }
 
 int main(void) {
-    ServerState state = {0};
-    state.running = 1;
-    pthread_mutex_init(&state.mutex, NULL);
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    
+    struct sockaddr_in server_addr;
+    memset(&server_addr, 0, sizeof(server_addr));
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    server_addr.sin_port = htons(PORT);
+    
+    bind(sock, (struct sockaddr*)&server_addr, sizeof(server_addr));
+    
+    Client clients[MAX_CLIENTS] = {0};
+    int num_clients = 0;
 
-    if (!init_server(&state)) {
-        exit(1);
-    }
-
-    if (!init_SDL()) {
-        close(state.socket_descriptor);
-        pthread_mutex_destroy(&state.mutex);
-        exit(1);
-    }
-
-    // Thread pour nettoyer les clients inactifs
-    pthread_t cleanup_tid;
-    pthread_create(&cleanup_tid, NULL, cleanup_thread, &state);
-
-    char buffer[BUFFER_SIZE];
-    struct sockaddr_in client_addr;
-    socklen_t client_len = sizeof(client_addr);
-    GameMessage* msg;
-    GameMessage response;
-
-    // Boucle principale
-    while(state.running) {
-        // Gestion des événements SDL
-        SDL_Event e;
-        while (SDL_PollEvent(&e)) {
-            if (e.type == SDL_QUIT) {
-                state.running = 0;
+    printf("Serveur démarré sur le port %d\n", PORT);
+    
+    signal(SIGINT, handle_sigint);
+    
+    while (running) {
+        Message msg;
+        struct sockaddr_in client_addr;
+        socklen_t client_len = sizeof(client_addr);
+        
+        recvfrom(sock, &msg, sizeof(msg), 0,
+                 (struct sockaddr*)&client_addr, &client_len);
+        
+        // Find or add client
+        int client_id = -1;
+        for (int i = 0; i < num_clients; i++) {
+            if (clients[i].addr.sin_addr.s_addr == client_addr.sin_addr.s_addr &&
+                clients[i].addr.sin_port == client_addr.sin_port) {
+                client_id = i;
+                break;
             }
         }
-
-        // Réception des messages (non-bloquant)
-        struct timeval tv = {0, 0};  // Polling immédiat
-        fd_set readfds;
-        FD_ZERO(&readfds);
-        FD_SET(state.socket_descriptor, &readfds);
         
-        if (select(state.socket_descriptor + 1, &readfds, NULL, NULL, &tv) > 0) {
-            int received = recvfrom(state.socket_descriptor, buffer, BUFFER_SIZE, 0,
-                                  (struct sockaddr*)&client_addr, &client_len);
-            
-            if(received > 0) {
-                pthread_mutex_lock(&state.mutex);
+        if (client_id == -1 && num_clients < MAX_CLIENTS) {
+            client_id = num_clients++;
+            clients[client_id].addr = client_addr;
+            memset(clients[client_id].grid, 0, sizeof(clients[client_id].grid));
+            printf("Nouveau client connecté (%d/2)\n", num_clients);
+        }
+        
+        if (client_id != -1) {
+            if (msg.type == 0) {  // Ship placement
+                // Place ship on grid
+                int x = msg.x;
+                int y = msg.y;
+                int isHorizontal = msg.hit;  // Using hit field for orientation
+                int length;
                 
-                int client_id = find_or_add_client(&state, &client_addr);
-                if(client_id >= 0) {
-                    msg = (GameMessage*)buffer;
-                    
-                    // Éviter les doublons
-                    if(msg->message_id > state.clients[client_id].last_message_id) {
-                        state.clients[client_id].last_message_id = msg->message_id;
-                        
-                        // Traiter le message
-                        switch(msg->type) {
-                            case 1:  // Tir
-                                printf("Tir reçu du client %d en %d,%d\n", 
-                                       client_id, msg->x, msg->y);
-                                
-                                // Envoyer la réponse
-                                response.message_id = msg->message_id;
-                                response.type = 2;
-                                response.x = msg->x;
-                                response.y = msg->y;
-                                response.result = 0;  // 0 = manqué, 1 = touché
-                                
-                                sendto(state.socket_descriptor, &response, sizeof(response), 0,
-                                      (struct sockaddr*)&client_addr, client_len);
-                                break;
+                // Determine ship length based on placement order
+                int numShips = 0;
+                for (int i = 0; i < 10; i++) {
+                    for (int j = 0; j < 10; j++) {
+                        if (clients[client_id].grid[i][j] == 1) numShips++;
+                    }
+                }
+                
+                if (numShips < 4) length = 2;        // First two ships: length 2
+                else if (numShips < 10) length = 3;  // Next two ships: length 3
+                else if (numShips < 14) length = 4;  // Next ship: length 4
+                else length = 5;                     // Last ship: length 5
+                
+                // Place ship
+                if (isHorizontal) {
+                    for (int i = 0; i < length; i++) {
+                        clients[client_id].grid[x + i][y] = 1;
+                    }
+                } else {
+                    for (int i = 0; i < length; i++) {
+                        clients[client_id].grid[x][y + i] = 1;
+                    }
+                }
+            }
+            else if (msg.type == 1 && num_clients == 2) {  // Shot
+                int target_id = 1 - client_id;  // Other player
+                int hit = 0;
+                
+                // Check if hit
+                if (clients[target_id].grid[msg.x][msg.y] == 1) {
+                    hit = 1;
+                    clients[target_id].grid[msg.x][msg.y] = 2;  // Mark as hit
+                }
+                
+                // Send result back to shooting player
+                Message response = {1, msg.x, msg.y, hit};
+                sendto(sock, &response, sizeof(response), 0,
+                      (struct sockaddr*)&client_addr, client_len);
+                
+                // Send shot info to target player
+                Message notification = {2, msg.x, msg.y, hit};  // Type 2 = incoming shot
+                sendto(sock, &notification, sizeof(notification), 0,
+                      (struct sockaddr*)&clients[target_id].addr, 
+                      sizeof(clients[target_id].addr));
+                
+                // Check for game over (all ships sunk)
+                int remaining_ships = 0;
+                for (int i = 0; i < 10; i++) {
+                    for (int j = 0; j < 10; j++) {
+                        if (clients[target_id].grid[i][j] == 1) {
+                            remaining_ships++;
                         }
                     }
                 }
                 
-                pthread_mutex_unlock(&state.mutex);
+                if (remaining_ships == 0) {
+                    printf("Joueur %d a gagné!\n", client_id + 1);
+                    Message gameOver = {3, 0, 0, client_id};  // Type 3 = game over
+                    for (int i = 0; i < num_clients; i++) {
+                        sendto(sock, &gameOver, sizeof(gameOver), 0,
+                              (struct sockaddr*)&clients[i].addr, 
+                              sizeof(clients[i].addr));
+                    }
+                    // Reset game state
+                    num_clients = 0;
+                }
             }
         }
-
-        // Rendu SDL
-        SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
-        SDL_RenderClear(renderer);
-        
-        pthread_mutex_lock(&state.mutex);
-        // TODO: Afficher l'état des parties en cours
-        pthread_mutex_unlock(&state.mutex);
-        
-        SDL_RenderPresent(renderer);
-        SDL_Delay(16);
     }
-
-    // Nettoyage
-    pthread_join(cleanup_tid, NULL);
-    close(state.socket_descriptor);
-    pthread_mutex_destroy(&state.mutex);
-    close_SDL();
-
+    
+    close(sock);
+    printf("\nServeur arrêté proprement\n");
     return 0;
 }
