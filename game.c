@@ -1,121 +1,91 @@
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include "interface.h"
+#include "game.h"
 
-#define PORT 8888
+void initGameState(GameState* state) {
+    memset(state->grid, 0, sizeof(state->grid));
+    memset(state->ships, 0, sizeof(state->ships));
+    state->shipsLeft = NUM_SHIPS;
+}
 
-typedef struct {
-    uint8_t type;  // 0=placement, 1=shot
-    uint8_t x;
-    uint8_t y;
-    uint8_t hit;
-} Message;
-
-int main(int argc, char *argv[]) {
-    if (argc != 2) {
-        printf("Usage: %s <ip_serveur>\n", argv[0]);
-        return 1;
-    }
-    
-    // Initialize network
-    int sock = socket(AF_INET, SOCK_DGRAM, 0);
-    struct sockaddr_in server_addr;
-    memset(&server_addr, 0, sizeof(server_addr));
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(PORT);
-    inet_aton(argv[1], &server_addr.sin_addr);
-    
-    // Initialize game state
-    GameState state = {0};
-    state.placementPhase = 1;
-    
-    // Initialize ships
-    int shipLengths[] = {2,2,3,3,4,5};
-    for (int i = 0; i < 6; i++) {
-        state.ships[i].length = shipLengths[i];
-        state.ships[i].isHorizontal = 1;
-    }
-    
-    if (!initSDL()) {
-        printf("Erreur initialisation SDL\n");
-        return 1;
-    }
-    printf("SDL initialisée avec succès\n");
-    
-    SDL_Event event;
-    int running = 1;
-    
-    while (running) {
-        while (SDL_PollEvent(&event)) {
-            if (event.type == SDL_QUIT) {
-                running = 0;
+void displayGrid(int grid[GRID_SIZE][GRID_SIZE], int showShips) {
+    printf("  0 1 2 3 4 5 6 7 8 9\n");
+    for (int y = 0; y < GRID_SIZE; y++) {
+        printf("%d ", y);
+        for (int x = 0; x < GRID_SIZE; x++) {
+            char c;
+            switch(grid[x][y]) {
+                case 0: c = '.'; break;  // Vide
+                case 1: c = showShips ? 'O' : '.'; break;  // Bateau
+                case 2: c = 'X'; break;  // Touché
+                case 3: c = '~'; break;  // Manqué
+                default: c = '?'; break;
             }
-            else if (event.type == SDL_MOUSEBUTTONDOWN) {
-                int mouseX = event.button.x;
-                int mouseY = event.button.y;
-                
-                if (state.placementPhase) {
-                    if (handleShipPlacement(&state, mouseX, mouseY)) {
-                        Message msg = {0, state.ships[state.currentShip-1].x,
-                                     state.ships[state.currentShip-1].y, 
-                                     state.ships[state.currentShip-1].isHorizontal};
-                        sendto(sock, &msg, sizeof(msg), 0,
-                              (struct sockaddr*)&server_addr, sizeof(server_addr));
+            printf("%c ", c);
+        }
+        printf("\n");
+    }
+}
+
+int isValidPlacement(GameState* state, int x, int y, int length, int isHorizontal) {
+    if (isHorizontal) {
+        if (x + length > GRID_SIZE) return 0;
+        for (int i = 0; i < length; i++) {
+            if (state->grid[x + i][y] != 0) return 0;
+        }
+    } else {
+        if (y + length > GRID_SIZE) return 0;
+        for (int i = 0; i < length; i++) {
+            if (state->grid[x][y + i] != 0) return 0;
+        }
+    }
+    return 1;
+}
+
+void placeShip(GameState* state, int x, int y, int length, int isHorizontal, int shipIndex) {
+    state->ships[shipIndex].length = length;
+    state->ships[shipIndex].x = x;
+    state->ships[shipIndex].y = y;
+    state->ships[shipIndex].isHorizontal = isHorizontal;
+    state->ships[shipIndex].hits = 0;
+    
+    if (isHorizontal) {
+        for (int i = 0; i < length; i++) {
+            state->grid[x + i][y] = 1;
+        }
+    } else {
+        for (int i = 0; i < length; i++) {
+            state->grid[x][y + i] = 1;
+        }
+    }
+}
+
+int processShot(GameState* state, int x, int y) {
+    if (state->grid[x][y] == 1) {  // Touché
+        state->grid[x][y] = 2;
+        
+        // Vérifier si un bateau est coulé
+        for (int i = 0; i < NUM_SHIPS; i++) {
+            Ship* ship = &state->ships[i];
+            if (ship->isHorizontal) {
+                if (x >= ship->x && x < ship->x + ship->length && y == ship->y) {
+                    ship->hits++;
+                    if (ship->hits == ship->length) {
+                        state->shipsLeft--;
                     }
                 }
-                else if (state.myTurn) {
-                    // Handle shooting
-                    int gridX = (mouseX - (GRID_OFFSET_X + 600)) / CELL_SIZE;
-                    int gridY = (mouseY - GRID_OFFSET_Y) / CELL_SIZE;
-                    if (gridX >= 0 && gridX < GRID_SIZE && gridY >= 0 && gridY < GRID_SIZE) {
-                        Message msg = {1, gridX, gridY, 0};
-                        sendto(sock, &msg, sizeof(msg), 0,
-                              (struct sockaddr*)&server_addr, sizeof(server_addr));
-                        state.myTurn = 0;
+            } else {
+                if (x == ship->x && y >= ship->y && y < ship->y + ship->length) {
+                    ship->hits++;
+                    if (ship->hits == ship->length) {
+                        state->shipsLeft--;
                     }
                 }
             }
-            else if (event.type == SDL_KEYDOWN && state.placementPhase) {
-                if (event.key.keysym.sym == SDLK_SPACE) {
-                    rotateCurrentShip(&state);
-                }
-            }
         }
-        
-        // Check for network messages
-        Message msg;
-        struct sockaddr_in from_addr;
-        socklen_t from_len = sizeof(from_addr);
-        if (recvfrom(sock, &msg, sizeof(msg), MSG_DONTWAIT,
-                     (struct sockaddr*)&from_addr, &from_len) > 0) {
-            if (msg.type == 1) {  // Shot result
-                state.enemyGrid[msg.x][msg.y] = msg.hit ? 1 : 2;
-                state.myTurn = 1;
-            }
-        }
-        
-        // Draw
-        SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
-        SDL_RenderClear(renderer);
-        
-        drawGrid(GRID_OFFSET_X, "Mon plateau");
-        drawGrid(GRID_OFFSET_X + 600, "Plateau de l'adversaire");
-        
-        if (state.placementPhase) {
-            drawShips(&state);
-        } else {
-            drawHitsAndMisses(&state);
-        }
-        
-        SDL_RenderPresent(renderer);
-        SDL_Delay(16);
+        return 1;
+    } else {  // Manqué
+        state->grid[x][y] = 3;
+        return 0;
     }
-    
-    close(sock);
-    closeSDL();
-    return 0;
 }

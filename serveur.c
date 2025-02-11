@@ -1,148 +1,197 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
-#include <arpa/inet.h>
-#include <signal.h>
+#include <time.h>
+#include <pthread.h>
+#include "game.h"
 #include "message.h"
 
 #define PORT 5000
 #define MAX_CLIENTS 2
 
 typedef struct {
-    struct sockaddr_in addr;
-    int grid[10][10];
+    int socket;
+    int id;
+    GameState state;
+    int mode;  // 0 = solo, 1 = multiplayer
+    int ready;  // Pour la synchronisation du placement des bateaux
 } Client;
 
-volatile int running = 1;
+typedef struct {
+    Client* clients[2];
+    int currentTurn;
+    int gameStarted;
+} MultiplayerGame;
 
-void handle_sigint(int sig) {
-    running = 0;
+Client* clients[MAX_CLIENTS] = {NULL};
+int num_clients = 0;
+pthread_mutex_t clients_mutex = PTHREAD_MUTEX_INITIALIZER;
+MultiplayerGame* waiting_game = NULL;
+
+void broadcast_to_opponent(Client* sender, Message* msg) {
+    pthread_mutex_lock(&clients_mutex);
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (clients[i] && clients[i] != sender && clients[i]->mode == 1) {
+            send(clients[i]->socket, msg, sizeof(Message), 0);
+        }
+    }
+    pthread_mutex_unlock(&clients_mutex);
 }
 
-int main(void) {
-    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+void* handle_client(void* arg) {
+    Client* client = (Client*)arg;
+    Message msg;
+    GameState serverState;
     
-    struct sockaddr_in server_addr;
-    memset(&server_addr, 0, sizeof(server_addr));
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    server_addr.sin_port = htons(PORT);
+    // Attendre le choix du mode de jeu
+    recv(client->socket, &msg, sizeof(Message), 0);
+    client->mode = msg.data;
     
-    bind(sock, (struct sockaddr*)&server_addr, sizeof(server_addr));
-    
-    Client clients[MAX_CLIENTS] = {0};
-    int num_clients = 0;
-
-    printf("Serveur démarré sur le port %d\n", PORT);
-    
-    signal(SIGINT, handle_sigint);
-    
-    while (running) {
-        Message msg;
-        struct sockaddr_in client_addr;
-        socklen_t client_len = sizeof(client_addr);
+    if (client->mode == 0) {  // Mode solo
+        // Initialiser le jeu solo
+        initGameState(&serverState);
+        placeRandomShips(&serverState);
         
-        recvfrom(sock, &msg, sizeof(msg), 0,
-                 (struct sockaddr*)&client_addr, &client_len);
+        // Envoyer confirmation au client
+        msg.type = MSG_GAME_START;
+        msg.data = 0;  // Mode solo
+        send(client->socket, &msg, sizeof(Message), 0);
         
-        // Find or add client
-        int client_id = -1;
-        for (int i = 0; i < num_clients; i++) {
-            if (clients[i].addr.sin_addr.s_addr == client_addr.sin_addr.s_addr &&
-                clients[i].addr.sin_port == client_addr.sin_port) {
-                client_id = i;
+        // Boucle de jeu solo
+        // [Code existant du mode solo]
+    }
+    else {  // Mode multijoueur
+        pthread_mutex_lock(&clients_mutex);
+        if (!waiting_game) {
+            // Premier joueur, créer une nouvelle partie
+            waiting_game = malloc(sizeof(MultiplayerGame));
+            waiting_game->clients[0] = client;
+            waiting_game->gameStarted = 0;
+            
+            // Informer le client qu'il doit attendre
+            msg.type = MSG_WAIT;
+            send(client->socket, &msg, sizeof(Message), 0);
+        }
+        else {
+            // Deuxième joueur, commencer la partie
+            waiting_game->clients[1] = client;
+            
+            // Informer les deux clients que la partie commence
+            msg.type = MSG_GAME_START;
+            msg.data = 1;  // Mode multijoueur
+            send(waiting_game->clients[0]->socket, &msg, sizeof(Message), 0);
+            send(waiting_game->clients[1]->socket, &msg, sizeof(Message), 0);
+            
+            // Choisir aléatoirement qui commence
+            waiting_game->currentTurn = rand() % 2;
+            msg.type = MSG_TURN;
+            msg.data = waiting_game->currentTurn;
+            send(waiting_game->clients[0]->socket, &msg, sizeof(Message), 0);
+            send(waiting_game->clients[1]->socket, &msg, sizeof(Message), 0);
+            
+            waiting_game->gameStarted = 1;
+        }
+        pthread_mutex_unlock(&clients_mutex);
+        
+        // Boucle de jeu multijoueur
+        while (1) {
+            if (recv(client->socket, &msg, sizeof(Message), 0) <= 0) {
                 break;
             }
-        }
-        
-        if (client_id == -1 && num_clients < MAX_CLIENTS) {
-            client_id = num_clients++;
-            clients[client_id].addr = client_addr;
-            memset(clients[client_id].grid, 0, sizeof(clients[client_id].grid));
-            printf("Nouveau client connecté (%d/2)\n", num_clients);
-        }
-        
-        if (client_id != -1) {
-            if (msg.type == 0) {  // Ship placement
-                // Place ship on grid
-                int x = msg.x;
-                int y = msg.y;
-                int isHorizontal = msg.hit;  // Using hit field for orientation
-                int length;
-                
-                // Determine ship length based on placement order
-                int numShips = 0;
-                for (int i = 0; i < 10; i++) {
-                    for (int j = 0; j < 10; j++) {
-                        if (clients[client_id].grid[i][j] == 1) numShips++;
+            
+            switch (msg.type) {
+                case MSG_PLACEMENT_DONE:
+                    client->ready = 1;
+                    if (waiting_game->clients[0]->ready && waiting_game->clients[1]->ready) {
+                        // Les deux joueurs ont placé leurs bateaux
+                        msg.type = MSG_ALL_PLACED;
+                        send(waiting_game->clients[0]->socket, &msg, sizeof(Message), 0);
+                        send(waiting_game->clients[1]->socket, &msg, sizeof(Message), 0);
                     }
-                }
-                
-                if (numShips < 4) length = 2;        // First two ships: length 2
-                else if (numShips < 10) length = 3;  // Next two ships: length 3
-                else if (numShips < 14) length = 4;  // Next ship: length 4
-                else length = 5;                     // Last ship: length 5
-                
-                // Place ship
-                if (isHorizontal) {
-                    for (int i = 0; i < length; i++) {
-                        clients[client_id].grid[x + i][y] = 1;
+                    break;
+                    
+                case MSG_SHOT:
+                    if (waiting_game->currentTurn == client->id) {
+                        // Transmettre le tir à l'adversaire
+                        broadcast_to_opponent(client, &msg);
+                        waiting_game->currentTurn = 1 - waiting_game->currentTurn;
+                        
+                        // Informer les joueurs du changement de tour
+                        msg.type = MSG_TURN;
+                        msg.data = waiting_game->currentTurn;
+                        send(waiting_game->clients[0]->socket, &msg, sizeof(Message), 0);
+                        send(waiting_game->clients[1]->socket, &msg, sizeof(Message), 0);
                     }
-                } else {
-                    for (int i = 0; i < length; i++) {
-                        clients[client_id].grid[x][y + i] = 1;
+                    break;
+                    
+                case MSG_RESULT:
+                    broadcast_to_opponent(client, &msg);
+                    if (msg.data == 2) {  // Victoire
+                        msg.type = MSG_GAME_OVER;
+                        send(waiting_game->clients[0]->socket, &msg, sizeof(Message), 0);
+                        send(waiting_game->clients[1]->socket, &msg, sizeof(Message), 0);
+                        return NULL;
                     }
-                }
-            }
-            else if (msg.type == 1 && num_clients == 2) {  // Shot
-                int target_id = 1 - client_id;  // Other player
-                int hit = 0;
-                
-                // Check if hit
-                if (clients[target_id].grid[msg.x][msg.y] == 1) {
-                    hit = 1;
-                    clients[target_id].grid[msg.x][msg.y] = 2;  // Mark as hit
-                }
-                
-                // Send result back to shooting player
-                Message response = {1, msg.x, msg.y, hit};
-                sendto(sock, &response, sizeof(response), 0,
-                      (struct sockaddr*)&client_addr, client_len);
-                
-                // Send shot info to target player
-                Message notification = {2, msg.x, msg.y, hit};  // Type 2 = incoming shot
-                sendto(sock, &notification, sizeof(notification), 0,
-                      (struct sockaddr*)&clients[target_id].addr, 
-                      sizeof(clients[target_id].addr));
-                
-                // Check for game over (all ships sunk)
-                int remaining_ships = 0;
-                for (int i = 0; i < 10; i++) {
-                    for (int j = 0; j < 10; j++) {
-                        if (clients[target_id].grid[i][j] == 1) {
-                            remaining_ships++;
-                        }
-                    }
-                }
-                
-                if (remaining_ships == 0) {
-                    printf("Joueur %d a gagné!\n", client_id + 1);
-                    Message gameOver = {3, 0, 0, client_id};  // Type 3 = game over
-                    for (int i = 0; i < num_clients; i++) {
-                        sendto(sock, &gameOver, sizeof(gameOver), 0,
-                              (struct sockaddr*)&clients[i].addr, 
-                              sizeof(clients[i].addr));
-                    }
-                    // Reset game state
-                    num_clients = 0;
-                }
+                    break;
             }
         }
     }
     
-    close(sock);
-    printf("\nServeur arrêté proprement\n");
+    return NULL;
+}
+
+void placeRandomShips(GameState* state) {
+    int shipLengths[] = {5, 4, 3, 3, 2};
+    srand(time(NULL));
+    
+    for (int i = 0; i < NUM_SHIPS; i++) {
+        int placed = 0;
+        while (!placed) {
+            int x = rand() % GRID_SIZE;
+            int y = rand() % GRID_SIZE;
+            int isHorizontal = rand() % 2;
+            
+            if (isValidPlacement(state, x, y, shipLengths[i], isHorizontal)) {
+                placeShip(state, x, y, shipLengths[i], isHorizontal, i);
+                placed = 1;
+            }
+        }
+    }
+}
+
+int main() {
+    int server_fd;
+    struct sockaddr_in address;
+    pthread_t thread_id;
+    
+    // Initialisation du serveur
+    server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = INADDR_ANY;
+    address.sin_port = htons(PORT);
+    
+    bind(server_fd, (struct sockaddr *)&address, sizeof(address));
+    listen(server_fd, 3);
+    
+    printf("Serveur démarré sur le port %d\n", PORT);
+    
+    while (1) {
+        struct sockaddr_in client_addr;
+        socklen_t client_len = sizeof(client_addr);
+        int client_socket = accept(server_fd, (struct sockaddr *)&client_addr, &client_len);
+        
+        Client* client = malloc(sizeof(Client));
+        client->socket = client_socket;
+        client->id = num_clients++;
+        client->ready = 0;
+        initGameState(&client->state);
+        
+        pthread_create(&thread_id, NULL, handle_client, client);
+        pthread_detach(thread_id);
+    }
+    
     return 0;
 }

@@ -1,237 +1,180 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include "interface.h"
+#include "game.h"
 #include "message.h"
 
-#define PORT 8888
+#define PORT 5000
 
-int isValidPlacement(GameState* state, int x, int y, int length, int isHorizontal) {
-    if (isHorizontal) {
-        if (x + length > GRID_SIZE) return 0;
-        for (int i = 0; i < length; i++) {
-            if (state->grid[x + i][y] != 0) return 0;
-            // Check adjacent cells
-            for (int dy = -1; dy <= 1; dy++) {
-                if (y + dy >= 0 && y + dy < GRID_SIZE) {
-                    for (int dx = -1; dx <= 1; dx++) {
-                        int newX = x + i + dx;
-                        if (newX >= 0 && newX < GRID_SIZE) {
-                            if (state->grid[newX][y + dy] != 0) return 0;
-                        }
-                    }
-                }
-            }
-        }
-    } else {
-        if (y + length > GRID_SIZE) return 0;
-        for (int i = 0; i < length; i++) {
-            if (state->grid[x][y + i] != 0) return 0;
-            // Check adjacent cells
-            for (int dx = -1; dx <= 1; dx++) {
-                if (x + dx >= 0 && x + dx < GRID_SIZE) {
-                    for (int dy = -1; dy <= 1; dy++) {
-                        int newY = y + i + dy;
-                        if (newY >= 0 && newY < GRID_SIZE) {
-                            if (state->grid[x + dx][newY] != 0) return 0;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    return 1;
-}
+GameState clientState;
+int enemyGrid[GRID_SIZE][GRID_SIZE] = {0};
+int myTurn = 0;
 
-void placeShip(GameState* state, int x, int y, int length, int isHorizontal) {
-    if (isHorizontal) {
-        for (int i = 0; i < length; i++) {
-            state->grid[x + i][y] = 1;
-        }
-    } else {
-        for (int i = 0; i < length; i++) {
-            state->grid[x][y + i] = 1;
+void placeShipsManually(GameState* state) {
+    int shipLengths[] = {5, 4, 3, 3, 2};
+    printf("\nPlacement des bateaux\n");
+    
+    for (int i = 0; i < NUM_SHIPS; i++) {
+        printf("\nPlacement d'un bateau de longueur %d\n", shipLengths[i]);
+        displayGrid(state->grid, 1);
+        
+        int placed = 0;
+        while (!placed) {
+            int x, y, orientation;
+            printf("Entrez les coordonnées (x y orientation[0=vertical,1=horizontal]): ");
+            scanf("%d %d %d", &x, &y, &orientation);
+            
+            if (x >= 0 && x < GRID_SIZE && y >= 0 && y < GRID_SIZE &&
+                isValidPlacement(state, x, y, shipLengths[i], orientation)) {
+                placeShip(state, x, y, shipLengths[i], orientation, i);
+                placed = 1;
+            } else {
+                printf("Position invalide, réessayez.\n");
+            }
         }
     }
 }
 
-int main(int argc, char *argv[]) {
+void choose_game_mode(int sock) {
+    int choice;
+    Message msg;
+    
+    printf("Choisissez le mode de jeu :\n");
+    printf("1. Solo (contre le serveur)\n");
+    printf("2. Multijoueur\n");
+    printf("Votre choix (1-2) : ");
+    scanf("%d", &choice);
+    
+    msg.type = MSG_MODE_CHOICE;
+    msg.data = (choice == 2) ? 1 : 0;
+    send(sock, &msg, sizeof(Message), 0);
+}
+
+void getShot(int* x, int* y) {
+    do {
+        printf("Entrez les coordonnées de tir (x y): ");
+        scanf("%d %d", x, y);
+    } while (*x < 0 || *x >= GRID_SIZE || *y < 0 || *y >= GRID_SIZE || 
+             enemyGrid[*x][*y] != 0);
+}
+
+int main(int argc, char* argv[]) {
     if (argc != 2) {
-        printf("Usage: %s <ip_serveur>\n", argv[0]);
+        printf("Usage: %s <adresse_serveur>\n", argv[0]);
         return 1;
     }
-
-    // Initialize network
-    int sock = socket(AF_INET, SOCK_DGRAM, 0);
-    struct sockaddr_in server_addr;
-    memset(&server_addr, 0, sizeof(server_addr));
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(PORT);
-    inet_aton(argv[1], &server_addr.sin_addr);
-
-    // Set socket to non-blocking
-    int flags = fcntl(sock, F_GETFL, 0);
-    fcntl(sock, F_SETFL, flags | O_NONBLOCK);
-
-    // Initialize game state
-    GameState state = {0};
-    state.placementPhase = 1;
-    state.myTurn = 1;  // First player to connect starts
-
-    // Initialize ships
-    int shipLengths[] = {2,2,3,3,4,5};
-    for (int i = 0; i < 6; i++) {
-        state.ships[i].length = shipLengths[i];
-        state.ships[i].isHorizontal = 1;
+    
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in serv_addr;
+    Message msg;
+    
+    // Configuration et connexion au serveur
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_port = htons(PORT);
+    inet_pton(AF_INET, argv[1], &serv_addr.sin_addr);
+    
+    if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
+        printf("Connexion échouée\n");
+        return -1;
     }
-
-    if (!initSDL()) return 1;
-
-    SDL_Event event;
-    int running = 1;
-
-    while (running) {
-        while (SDL_PollEvent(&event)) {
-            if (event.type == SDL_QUIT) {
-                running = 0;
-            }
-            else if (event.type == SDL_MOUSEBUTTONDOWN && !state.gameOver) {
-                int mouseX = event.button.x;
-                int mouseY = event.button.y;
-
-                if (state.placementPhase) {
-                    // Convert mouse coordinates to grid coordinates
-                    int gridX = (mouseX - GRID_OFFSET_X) / CELL_SIZE;
-                    int gridY = (mouseY - GRID_OFFSET_Y) / CELL_SIZE;
-
-                    if (gridX >= 0 && gridX < GRID_SIZE && gridY >= 0 && gridY < GRID_SIZE) {
-                        Ship* currentShip = &state.ships[state.currentShip];
-                        if (isValidPlacement(&state, gridX, gridY, 
-                                          currentShip->length, 
-                                          currentShip->isHorizontal)) {
-                            placeShip(&state, gridX, gridY, 
-                                    currentShip->length, 
-                                    currentShip->isHorizontal);
-                            
-                            // Send placement to server
-                            Message msg = {0, gridX, gridY, currentShip->isHorizontal};
-                            sendto(sock, &msg, sizeof(msg), 0,
-                                  (struct sockaddr*)&server_addr, sizeof(server_addr));
-
-                            state.currentShip++;
-                            if (state.currentShip >= 6) {
-                                state.placementPhase = 0;
-                                printf("Phase de tir commencée\n");
-                            }
-                        }
-                    }
-                }
-                else if (state.myTurn) {
-                    // Handle shooting
-                    int gridX = (mouseX - (GRID_OFFSET_X + 600)) / CELL_SIZE;
-                    int gridY = (mouseY - GRID_OFFSET_Y) / CELL_SIZE;
-                    if (gridX >= 0 && gridX < GRID_SIZE && gridY >= 0 && gridY < GRID_SIZE &&
-                        state.enemyGrid[gridX][gridY] == 0) {
-                        Message msg = {1, gridX, gridY, 0};
-                        sendto(sock, &msg, sizeof(msg), 0,
-                              (struct sockaddr*)&server_addr, sizeof(server_addr));
-                        state.myTurn = 0;
-                    }
-                }
-            }
-            else if (event.type == SDL_KEYDOWN && state.placementPhase) {
-                if (event.key.keysym.sym == SDLK_SPACE && state.currentShip < 6) {
-                    state.ships[state.currentShip].isHorizontal = 
-                        !state.ships[state.currentShip].isHorizontal;
-                }
-            }
+    
+    printf("Connecté au serveur\n");
+    
+    // Choix du mode de jeu
+    choose_game_mode(sock);
+    
+    // Réception de la confirmation du serveur
+    recv(sock, &msg, sizeof(Message), 0);
+    
+    if (msg.type == MSG_WAIT) {
+        printf("En attente d'un autre joueur...\n");
+        recv(sock, &msg, sizeof(Message), 0);
+    }
+    
+    if (msg.type == MSG_GAME_START) {
+        int multiplayer = msg.data;
+        
+        // Placement des bateaux
+        initGameState(&clientState);
+        placeShipsManually(&clientState);
+        
+        // Informer le serveur que le placement est terminé
+        msg.type = MSG_PLACEMENT_DONE;
+        send(sock, &msg, sizeof(Message), 0);
+        
+        if (multiplayer) {
+            printf("En attente que l'autre joueur place ses bateaux...\n");
+            recv(sock, &msg, sizeof(Message), 0);
         }
-
-        // Check for network messages
-        Message msg;
-        struct sockaddr_in from_addr;
-        socklen_t from_len = sizeof(from_addr);
-        while (recvfrom(sock, &msg, sizeof(msg), 0,
-                       (struct sockaddr*)&from_addr, &from_len) > 0) {
+        
+        // Réception du premier tour
+        recv(sock, &msg, sizeof(Message), 0);
+        myTurn = (msg.type == MSG_TURN && msg.data == 1);
+        
+        // Boucle principale du jeu
+        while (1) {
+            printf("\nVotre grille :\n");
+            displayGrid(clientState.grid, 1);
+            printf("\nGrille ennemie :\n");
+            displayGrid(enemyGrid, 0);
+            
+            if (myTurn) {
+                printf("\nC'est votre tour !\n");
+                int x, y;
+                getShot(&x, &y);
+                
+                msg.type = MSG_SHOT;
+                msg.x = x;
+                msg.y = y;
+                send(sock, &msg, sizeof(Message), 0);
+                myTurn = 0;
+            }
+            else {
+                printf("\nEn attente du tour de l'adversaire...\n");
+            }
+            
+            // Attente des messages
+            recv(sock, &msg, sizeof(Message), 0);
             switch (msg.type) {
-                case 1:  // Shot result
-                    state.enemyGrid[msg.x][msg.y] = msg.hit ? 1 : 2;
-                    state.myTurn = 1;
+                case MSG_SHOT:
+                    printf("Tir adverse en (%d,%d)\n", msg.x, msg.y);
+                    int hit = processShot(&clientState, msg.x, msg.y);
+                    msg.type = MSG_RESULT;
+                    msg.data = hit;
+                    if (clientState.shipsLeft == 0) msg.data = 2;  // Victoire
+                    send(sock, &msg, sizeof(Message), 0);
                     break;
-                case 2:  // Incoming shot
-                    if (state.grid[msg.x][msg.y] == 1) {
-                        state.grid[msg.x][msg.y] = 2;  // Hit
-                    } else {
-                        state.grid[msg.x][msg.y] = 3;  // Miss
+                    
+                case MSG_RESULT:
+                    if (msg.data == 0) {
+                        printf("Manqué !\n");
+                        enemyGrid[msg.x][msg.y] = 3;
+                    }
+                    else if (msg.data == 1) {
+                        printf("Touché !\n");
+                        enemyGrid[msg.x][msg.y] = 2;
+                    }
+                    else if (msg.data == 2) {
+                        printf("Victoire ! Tous les bateaux ennemis sont coulés !\n");
+                        return 0;
                     }
                     break;
-                case 3:  // Game over
-                    state.gameOver = 1;
-                    state.winner = msg.hit;  // Using hit field for winner ID
+                    
+                case MSG_TURN:
+                    myTurn = (msg.data == 1);
                     break;
+                    
+                case MSG_GAME_OVER:
+                    printf("Partie terminée !\n");
+                    return 0;
             }
         }
-
-        // Draw
-        SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
-        SDL_RenderClear(renderer);
-
-        drawGrid(GRID_OFFSET_X, "Mon plateau");
-        drawGrid(GRID_OFFSET_X + 600, "Plateau de l'adversaire");
-
-        if (state.placementPhase) {
-            drawShips(&state);
-            
-            // Draw placement instructions
-            SDL_Color textColor = {0, 0, 0, 255};
-            char instructions[100];
-            snprintf(instructions, 100, "Placez votre bateau de %d cases (ESPACE pour pivoter)", 
-                    state.ships[state.currentShip].length);
-            SDL_Surface* surface = TTF_RenderText_Solid(font, instructions, textColor);
-            SDL_Texture* texture = SDL_CreateTextureFromSurface(renderer, surface);
-            SDL_Rect rect = {WINDOW_WIDTH/2 - surface->w/2, 10, surface->w, surface->h};
-            SDL_RenderCopy(renderer, texture, NULL, &rect);
-            SDL_FreeSurface(surface);
-            SDL_DestroyTexture(texture);
-        } else {
-            drawHitsAndMisses(&state);
-            
-            // Draw turn indicator
-            SDL_Color textColor = {0, 0, 0, 255};
-            const char* turnText = state.myTurn ? "C'est votre tour" : "Tour de l'adversaire";
-            SDL_Surface* surface = TTF_RenderText_Solid(font, turnText, textColor);
-            SDL_Texture* texture = SDL_CreateTextureFromSurface(renderer, surface);
-            SDL_Rect rect = {WINDOW_WIDTH/2 - surface->w/2, 10, surface->w, surface->h};
-            SDL_RenderCopy(renderer, texture, NULL, &rect);
-            SDL_FreeSurface(surface);
-            SDL_DestroyTexture(texture);
-        }
-
-        if (state.gameOver) {
-            // Draw game over message
-            SDL_Color textColor = {255, 0, 0, 255};
-            const char* gameOverText = state.winner == state.myTurn ? 
-                                     "Victoire !" : "Défaite...";
-            SDL_Surface* surface = TTF_RenderText_Solid(font, gameOverText, textColor);
-            SDL_Texture* texture = SDL_CreateTextureFromSurface(renderer, surface);
-            SDL_Rect rect = {WINDOW_WIDTH/2 - surface->w/2, 
-                           WINDOW_HEIGHT/2 - surface->h/2,
-                           surface->w, surface->h};
-            SDL_RenderCopy(renderer, texture, NULL, &rect);
-            SDL_FreeSurface(surface);
-            SDL_DestroyTexture(texture);
-        }
-
-        SDL_RenderPresent(renderer);
-        SDL_Delay(16);  // ~60 FPS
     }
-
+    
     close(sock);
-    closeSDL();
     return 0;
 }

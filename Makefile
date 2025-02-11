@@ -1,11 +1,11 @@
 CC = gcc
-CFLAGS = -Wall -Wextra -I/usr/include/SDL2
-LDFLAGS = -lSDL2 -lSDL2_ttf -pthread
+CFLAGS = -Wall -Wextra
+LDFLAGS = -pthread
 
 # Source files
-CLIENT_SRC = client.c interface.c
-SERVER_SRC = serveur.c
-COMMON_HEADERS = interface.h message.h
+CLIENT_SRC = client.c game.c
+SERVER_SRC = serveur.c game.c
+COMMON_HEADERS = game.h message.h
 
 # Object files
 CLIENT_OBJ = $(CLIENT_SRC:.c=.o)
@@ -16,11 +16,11 @@ all: client serveur
 
 # Client compilation
 client: $(CLIENT_OBJ)
-	$(CC) -o $@ $(CLIENT_OBJ) $(LDFLAGS) -D_GNU_SOURCE
+	$(CC) -o $@ $(CLIENT_OBJ) $(LDFLAGS)
 
 # Server compilation
 serveur: $(SERVER_OBJ)
-	$(CC) -o $@ $(SERVER_OBJ) $(LDFLAGS) -D_GNU_SOURCE
+	$(CC) -o $@ $(SERVER_OBJ) $(LDFLAGS)
 
 # Object file compilation
 %.o: %.c $(COMMON_HEADERS)
@@ -28,11 +28,11 @@ serveur: $(SERVER_OBJ)
 
 # Clean target
 clean:
-	rm -f $(CLIENT_OBJ) $(SERVER_OBJ) client serveur
+	rm -f *.o client serveur
 
 # Dependencies
-client.o: client.c interface.h message.h
-interface.o: interface.c interface.h
-serveur.o: serveur.c message.h
+client.o: client.c game.h message.h
+game.o: game.c game.h
+serveur.o: serveur.c game.h message.h
 
 .PHONY: all clean
