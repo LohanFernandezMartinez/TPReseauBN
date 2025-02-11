@@ -70,6 +70,7 @@ void* handle_client(void* arg) {
             waiting_game = malloc(sizeof(MultiplayerGame));
             waiting_game->clients[0] = client;
             waiting_game->gameStarted = 0;
+            waiting_game->currentTurn = -1;  // Aucun tour assigné pour l'instant
             
             // Informer le client qu'il doit attendre
             msg.type = MSG_WAIT;
@@ -84,15 +85,6 @@ void* handle_client(void* arg) {
             msg.data = 1;  // Mode multijoueur
             send(waiting_game->clients[0]->socket, &msg, sizeof(Message), 0);
             send(waiting_game->clients[1]->socket, &msg, sizeof(Message), 0);
-            
-            // Choisir aléatoirement qui commence
-            waiting_game->currentTurn = rand() % 2;
-            msg.type = MSG_TURN;
-            msg.data = waiting_game->currentTurn;
-            send(waiting_game->clients[0]->socket, &msg, sizeof(Message), 0);
-            send(waiting_game->clients[1]->socket, &msg, sizeof(Message), 0);
-            
-            waiting_game->gameStarted = 1;
         }
         pthread_mutex_unlock(&clients_mutex);
         
@@ -110,6 +102,18 @@ void* handle_client(void* arg) {
                         msg.type = MSG_ALL_PLACED;
                         send(waiting_game->clients[0]->socket, &msg, sizeof(Message), 0);
                         send(waiting_game->clients[1]->socket, &msg, sizeof(Message), 0);
+                        
+                        // Initialiser le premier tour
+                        if (waiting_game->currentTurn == -1) {
+                            waiting_game->currentTurn = 0;  // Le premier joueur commence
+                            msg.type = MSG_TURN;
+                            
+                            // Envoyer les messages de tour aux deux joueurs
+                            msg.data = 1;  // C'est ton tour
+                            send(waiting_game->clients[0]->socket, &msg, sizeof(Message), 0);
+                            msg.data = 0;  // Ce n'est pas ton tour
+                            send(waiting_game->clients[1]->socket, &msg, sizeof(Message), 0);
+                        }
                     }
                     break;
                     
