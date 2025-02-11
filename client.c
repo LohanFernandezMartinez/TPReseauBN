@@ -89,7 +89,7 @@ int main(int argc, char* argv[]) {
     
     // Réception de la confirmation du serveur
     recv(sock, &msg, sizeof(Message), 0);
-    
+
     if (msg.type == MSG_WAIT) {
         printf("En attente d'un autre joueur...\n");
         recv(sock, &msg, sizeof(Message), 0);
@@ -131,7 +131,7 @@ int main(int argc, char* argv[]) {
                 msg.x = x;
                 msg.y = y;
                 send(sock, &msg, sizeof(Message), 0);
-                myTurn = 0;
+                
             }
             else {
                 printf("\nEn attente du tour de l'adversaire...\n");
@@ -165,7 +165,10 @@ int main(int argc, char* argv[]) {
                     break;
                     
                 case MSG_TURN:
-                    myTurn = (msg.data == 1);
+                    if (multiplayer)
+                        myTurn = 1 - myTurn;
+                    else
+                        myTurn = 1;
                     break;
                     
                 case MSG_GAME_OVER:

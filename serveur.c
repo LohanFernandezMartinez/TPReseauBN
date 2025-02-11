@@ -54,14 +54,53 @@ void* handle_client(void* arg) {
         // Initialiser le jeu solo
         initGameState(&serverState);
         placeRandomShips(&serverState);
-        
+        printf("Serveur: Bateaux placés\n");
+        displayGrid(serverState.grid, 1);
+
         // Envoyer confirmation au client
         msg.type = MSG_GAME_START;
         msg.data = 0;  // Mode solo
         send(client->socket, &msg, sizeof(Message), 0);
         
         // Boucle de jeu solo
-        // [Code existant du mode solo]
+        // Boucle principale du jeu
+        int gameOver = 0;
+        while (!gameOver) {
+            // Réception du message du client
+            if (recv(client->socket, &msg, sizeof(Message), 0) <= 0) {
+                printf("Client déconnecté\n");
+                break;
+            }
+            
+            switch (msg.type) {
+                case MSG_SHOT: {
+                    printf("Tir reçu en (%d,%d)\n", msg.x, msg.y);
+                    
+                    // Traitement du tir
+                    int result = processShot(&serverState, msg.x, msg.y);
+                    
+                    // Envoi du résultat
+                    Message response = {
+                        .type = MSG_RESULT,
+                        .x = msg.x,
+                        .y = msg.y,
+                        .data = result
+                    };
+                    send(client->socket, &response, sizeof(Message), 0);
+                    
+                    // Vérification de fin de partie
+                    if (serverState.shipsLeft == 0) {
+                        Message gameOverMsg = {
+                            .type = MSG_GAME_OVER,
+                            .data = 1  // Victoire du client
+                        };
+                        send(client->socket, &gameOverMsg, sizeof(Message), 0);
+                        gameOver = 1;
+                    }
+                    break;
+                }
+            }
+        }
     }
     else {  // Mode multijoueur
         pthread_mutex_lock(&clients_mutex);
@@ -119,13 +158,16 @@ void* handle_client(void* arg) {
                     
                 case MSG_SHOT:
                     if (waiting_game->currentTurn == client->id) {
+
+                        printf("--> Tir reçu en (%d,%d) du client %d au client %d -->\n", msg.x, msg.y, client->id, 1 - client->id);
                         // Transmettre le tir à l'adversaire
                         broadcast_to_opponent(client, &msg);
                         waiting_game->currentTurn = 1 - waiting_game->currentTurn;
                         
+
                         // Informer les joueurs du changement de tour
                         msg.type = MSG_TURN;
-                        msg.data = waiting_game->currentTurn;
+                        msg.data = waiting_game->currentTurn;           // Ne sert à rien ?
                         send(waiting_game->clients[0]->socket, &msg, sizeof(Message), 0);
                         send(waiting_game->clients[1]->socket, &msg, sizeof(Message), 0);
                     }
@@ -186,6 +228,8 @@ int main() {
         struct sockaddr_in client_addr;
         socklen_t client_len = sizeof(client_addr);
         int client_socket = accept(server_fd, (struct sockaddr *)&client_addr, &client_len);
+
+        printf("Client connecté\n");
         
         Client* client = malloc(sizeof(Client));
         client->socket = client_socket;
