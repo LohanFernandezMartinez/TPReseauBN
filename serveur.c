@@ -99,6 +99,14 @@ void* handle_client(void* arg) {
                     }
                     break;
                 }
+
+                case MSG_PLACEMENT_DONE: {
+                    printf("Placement des bateaux terminé\nLa partie va débuter\n");
+                    msg.type = MSG_TURN;
+                    msg.data = 1;  // C'est au client de jouer
+                    send(client->socket, &msg, sizeof(Message), 0);
+                    break;
+                }
             }
         }
     }
@@ -182,6 +190,10 @@ void* handle_client(void* arg) {
                         return NULL;
                     }
                     break;
+
+                case MSG_WAIT:
+                    break;
+
             }
         }
     }

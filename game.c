@@ -72,6 +72,9 @@ int processShot(GameState* state, int x, int y) {
                     ship->hits++;
                     if (ship->hits == ship->length) {
                         state->shipsLeft--;
+                        printf("Bateau coulé !\n");
+                    } else {
+                        printf("Touché !\n");
                     }
                 }
             } else {
@@ -79,13 +82,16 @@ int processShot(GameState* state, int x, int y) {
                     ship->hits++;
                     if (ship->hits == ship->length) {
                         state->shipsLeft--;
-                    }
+                        printf("Bateau coulé !\n");
+                    } else {
+                        printf("Touché !\n");}
                 }
             }
         }
         return 1;
     } else {  // Manqué
         state->grid[x][y] = 3;
+        printf("Manqué !\n");
         return 0;
     }
 }

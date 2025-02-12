@@ -113,7 +113,10 @@ int main(int argc, char* argv[]) {
         
         // Réception du premier tour
         recv(sock, &msg, sizeof(Message), 0);
-        myTurn = (msg.type == MSG_TURN && msg.data == 1);
+        if(msg.type == MSG_TURN && msg.data == 1)
+            myTurn = 1;
+        else
+            myTurn = 0;
         
         // Boucle principale du jeu
         while (1) {
